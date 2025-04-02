@@ -1,113 +1,194 @@
-import sys
+import os
+import time
+import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
-from models.generator import Generator
-from data_loader import get_data_loader
-from model_saver import save_model, load_model
-from config import Config
-from loss_functions import mse_loss, PerceptualLoss, total_variation_loss, adversarial_loss
-from train_helpers import calculate_psnr
-from logger import setup_logger, log_training_progress
-from discriminator import Discriminator  # Import the discriminator model
-import argparse
+from torch.utils.data import TensorDataset, DataLoader
+from tqdm import tqdm
+from math import log10
+from torchvision.models.vgg import vgg16
 
-# Discriminator loss function
-def discriminator_loss(discriminator, real_data, fake_data):
-    real_scores = discriminator(real_data)
-    fake_scores = discriminator(fake_data.detach())
-    real_loss = torch.mean((real_scores - 1) ** 2)  # Real should be 1
-    fake_loss = torch.mean(fake_scores ** 2)  # Fake should be 0
-    return (real_loss + fake_loss) / 2
+# Check device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
-# Compute the total loss based on the individual losses and weights for the generator
-def compute_total_loss(output, target, perceptual_loss, discriminator, loss_weights):
-    mse = mse_loss(output, target) * loss_weights['mse']
-    perceptual = perceptual_loss(output, target) * loss_weights['perceptual']
-    tv = total_variation_loss(output) * loss_weights['tv']
-    adv = adversarial_loss(discriminator, output) * loss_weights['adversarial']
+# ---------------- MODEL DEFINITION ----------------
 
-    total_loss = mse + perceptual + tv + adv
-    return total_loss
+class SelfAttention(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
 
-# Main training loop
-def train_model(model, discriminator, data_loader, optimizer, optimizer_d, loss_weights, epochs, device, model_save_path, logger):
-    perceptual_loss = PerceptualLoss().to(device)
+    def forward(self, x):
+        B, C, H, W = x.size()
+        proj_query = self.query(x).view(B, -1, H * W).permute(0, 2, 1)
+        proj_key = self.key(x).view(B, -1, H * W)
+        energy = torch.bmm(proj_query, proj_key)
+        attention = torch.softmax(energy, dim=-1)
+        proj_value = self.value(x).view(B, -1, H * W)
 
-    for epoch in range(epochs):
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1)).view(B, C, H, W)
+        out = self.gamma * out + x
+        return out
+
+class Basic_Block(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class Residual_Block(nn.Module):
+    def __init__(self, num_channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        out = torch.relu(self.conv1(x))
+        out = torch.relu(self.conv2(out) + x)
+        return out
+
+class Cascading_Block(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.r1, self.r2, self.r3 = Residual_Block(channels), Residual_Block(channels), Residual_Block(channels)
+        self.c1, self.c2, self.c3 = Basic_Block(channels * 2, channels), Basic_Block(channels * 3, channels), Basic_Block(channels * 4, channels)
+        self.attn = SelfAttention(channels)
+
+    def forward(self, x):
+        c0 = o0 = x
+        b1 = self.r1(o0)
+        c1, o1 = torch.cat([c0, b1], dim=1), self.c1(torch.cat([c0, b1], dim=1))
+        b2 = self.r2(o1)
+        c2, o2 = torch.cat([c1, b2], dim=1), self.c2(torch.cat([c1, b2], dim=1))
+        b3 = self.r3(o2)
+        c3, o3 = torch.cat([c2, b3], dim=1), self.c3(torch.cat([c2, b3], dim=1))
+        return self.attn(o3)
+
+class ScHiCAtt(nn.Module):
+    def __init__(self, num_channels=64):
+        super().__init__()
+        self.entry = nn.Conv2d(1, num_channels, kernel_size=3, stride=1, padding=1)
+        self.cb1, self.cb2, self.cb3, self.cb4, self.cb5 = Cascading_Block(num_channels), Cascading_Block(num_channels), Cascading_Block(num_channels), Cascading_Block(num_channels), Cascading_Block(num_channels)
+        self.cv1, self.cv2, self.cv3, self.cv4, self.cv5 = nn.Conv2d(num_channels * 2, num_channels, kernel_size=1), nn.Conv2d(num_channels * 3, num_channels, kernel_size=1), nn.Conv2d(num_channels * 4, num_channels, kernel_size=1), nn.Conv2d(num_channels * 5, num_channels, kernel_size=1), nn.Conv2d(num_channels * 6, num_channels, kernel_size=1)
+        self.exit = nn.Conv2d(num_channels, 1, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        x = self.entry(x)
+        c0 = o0 = x
+        b1, c1, o1 = self.cb1(o0), torch.cat([c0, self.cb1(o0)], dim=1), self.cv1(torch.cat([c0, self.cb1(o0)], dim=1))
+        b2, c2, o2 = self.cb2(o1), torch.cat([c1, self.cb2(o1)], dim=1), self.cv2(torch.cat([c1, self.cb2(o1)], dim=1))
+        b3, c3, o3 = self.cb3(o2), torch.cat([c2, self.cb3(o2)], dim=1), self.cv3(torch.cat([c2, self.cb3(o2)], dim=1))
+        b4, c4, o4 = self.cb4(o3), torch.cat([c3, self.cb4(o3)], dim=1), self.cv4(torch.cat([c3, self.cb4(o3)], dim=1))
+        b5, c5, o5 = self.cb5(o4), torch.cat([c4, self.cb5(o4)], dim=1), self.cv5(torch.cat([c4, self.cb5(o4)], dim=1))
+        return self.exit(o5)
+
+# ---------------- LOSS FUNCTION ----------------
+
+class TVLoss(nn.Module):
+    def forward(self, x):
+        return ((x[:, :, 1:, :] - x[:, :, :-1, :]).pow(2).sum() + (x[:, :, :, 1:] - x[:, :, :, :-1]).pow(2).sum()) / x.shape[0]
+
+class GeneratorLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        vgg = vgg16(pretrained=True).features[:31].eval()
+        for param in vgg.parameters(): param.requires_grad = False
+        self.loss_network = vgg
+        self.mse_loss = nn.MSELoss()
+        self.tv_loss = TVLoss()
+
+    def forward(self, out_images, target_images):
+        perception_loss = self.mse_loss(self.loss_network(out_images.repeat([1, 3, 1, 1])).view(out_images.size(0), -1), self.loss_network(target_images.repeat([1, 3, 1, 1])).view(target_images.size(0), -1))
+        image_loss = self.mse_loss(out_images, target_images)
+        return image_loss + 0.001 * perception_loss + 2e-8 * self.tv_loss(out_images)
+
+# ---------------- DATA LOADER ----------------
+
+def load_dataset(npz_path):
+    data = np.load(npz_path)
+    return TensorDataset(
+        torch.tensor(data['data'], dtype=torch.float32),
+        torch.tensor(data['target'], dtype=torch.float32)
+    )
+
+# ---------------- TRAINING FUNCTION ----------------
+
+def train_schicatt(train_data_path, valid_data_path, num_epochs=1, batch_size=64, lr=0.0003, save_path="schicatt.pth"):
+    abs_train_path = os.path.abspath(train_data_path)
+    abs_valid_path = os.path.abspath(valid_data_path)
+
+    print(f"Looking for training data at: {abs_train_path}")
+    print(f"Looking for validation data at: {abs_valid_path}")
+
+    if not os.path.exists(train_data_path):
+        raise FileNotFoundError(f"Training data not found: {abs_train_path}")
+    if not os.path.exists(valid_data_path):
+        raise FileNotFoundError(f"Validation data not found: {abs_valid_path}")
+
+    print("Loading data...")
+    train_loader = DataLoader(load_dataset(train_data_path), batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(load_dataset(valid_data_path), batch_size=batch_size, shuffle=False)
+
+    model = ScHiCAtt(num_channels=64).to(device)
+    criterion = GeneratorLoss().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    print("Starting training...")
+    best_val_loss = float('inf')
+
+    for epoch in range(num_epochs):
         model.train()
-        total_g_loss = 0
-        total_d_loss = 0
-        psnr_total = 0
+        epoch_loss = 0
 
-        for batch in data_loader:
-            inputs, targets = batch['input'].to(device), batch['target'].to(device)
-
-            # Generate output from generator
-            outputs = model(inputs)
-
-            # Train discriminator
-            optimizer_d.zero_grad()
-            d_loss = discriminator_loss(discriminator, targets, outputs)
-            d_loss.backward()
-            optimizer_d.step()
-            total_d_loss += d_loss.item()
-
-            # Train generator
+        for data, target in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
-            g_loss = compute_total_loss(outputs, targets, perceptual_loss, discriminator, loss_weights)
-            g_loss.backward()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
             optimizer.step()
-            total_g_loss += g_loss.item()
+            epoch_loss += loss.item()
 
-            # Calculate PSNR
-            psnr_value = calculate_psnr(outputs, targets)
-            psnr_total += psnr_value
+        avg_train_loss = epoch_loss / len(train_loader)
+        print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}")
 
-        avg_g_loss = total_g_loss / len(data_loader)
-        avg_d_loss = total_d_loss / len(data_loader)
-        avg_psnr = psnr_total / len(data_loader)
+        # --- Validation ---
+        model.eval()
+        with torch.no_grad():
+            val_loss = 0
+            for val_data, val_target in valid_loader:
+                val_data, val_target = val_data.to(device), val_target.to(device)
+                val_output = model(val_data)
+                val_loss += criterion(val_output, val_target).item()
+            avg_val_loss = val_loss / len(valid_loader)
+            print(f"Epoch {epoch+1}: Validation Loss = {avg_val_loss:.4f}")
 
-        print(f"Epoch [{epoch + 1}/{epochs}], Generator Loss: {avg_g_loss:.4f}, Discriminator Loss: {avg_d_loss:.4f}, PSNR: {avg_psnr:.4f}")
-        log_training_progress(logger, epoch + 1, avg_g_loss, avg_psnr)
+            # Save best model
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(model.state_dict(), save_path)
+                print(f"Best model saved to {save_path}")
 
-        # Save the model at each epoch
-        save_model(model, optimizer, epoch, model_save_path)
-
-    print("Training complete. Model saved at", model_save_path)
+# ---------------- RUN TRAINING ----------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Training process for ScHiCAtt.")
-    parser.add_argument('-e', '--epoch', type=int, default=Config.epochs, help='Number of training epochs')
-    parser.add_argument('-b', '--batch_size', type=int, default=Config.batch_size, help='Batch size for training')
-    parser.add_argument('-a', '--attention', type=str, choices=["self", "local", "global", "dynamic"], default=Config.attention_type, help="Type of attention mechanism to use")
-    parser.add_argument('--load_model', type=str, help='Path to a saved model to resume training (optional)')
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train ScHiCAtt model")
+    parser.add_argument("--train_data", type=str, required=True, help="Path to training dataset (.npz)")
+    parser.add_argument("--valid_data", type=str, required=True, help="Path to validation dataset (.npz)")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--lr", type=float, default=0.0003, help="Learning rate")
+    parser.add_argument("--save_path", type=str, default="schicatt.pth", help="Path to save the trained model")
+
     args = parser.parse_args()
 
-    # Set device (use GPU if available)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Setup logger
-    logger = setup_logger("training_log.txt")
-
-    # Instantiate the model and discriminator
-    model = Generator(num_channels=64, attention_type=args.attention).to(device)
-    discriminator = Discriminator(in_channels=1).to(device)  # Instantiate the discriminator
-
-    # Define optimizers
-    optimizer = optim.Adam(model.parameters(), lr=Config.learning_rate)  # For generator
-    optimizer_d = optim.Adam(discriminator.parameters(), lr=Config.learning_rate)  # For discriminator
-
-    # Loss weights (adjust as needed)
-    loss_weights = Config.loss_weights
-
-    # Load data
-    data_loader = get_data_loader(data_file=Config.data_file, target_file=Config.target_file, batch_size=args.batch_size)
-
-    # Optionally load a saved model to resume training
-    start_epoch = 0
-    if args.load_model:
-        model, optimizer, start_epoch = load_model(model, optimizer, args.load_model)
-        print(f"Resuming training from epoch {start_epoch + 1}")
-
-    # Train the model
-    train_model(model, discriminator, data_loader, optimizer, optimizer_d, loss_weights, epochs=args.epoch, device=device, model_save_path=Config.model_save_path, logger=logger)
+    train_schicatt(args.train_data, args.valid_data, args.epochs, args.batch_size, args.lr, args.save_path)

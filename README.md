@@ -67,20 +67,95 @@ All necessary dependencies are bundled within the Docker environment. The core d
 
 ___________________  
 
-## Training:
+##  Training
 
-The ScHiCAtt model supports multiple attention mechanisms, such as self, local, global, and dynamic attention. To train the model, use the following command:
+To train the ScHiCAtt model on your Hi-C data, navigate to the `Training folder` and use the following command:
 
-```bash
-$ python training/train.py --epoch 300 --batch_size 8 --attention self
+```
+python3 train.py \
+  --train_data path/to/train_data.npz \
+  --valid_data path/to/valid_data.npz \
+  --epochs 50 \
+  --batch_size 32 \
+  --lr 0.0001 \
+  --save_path checkpoints/schicatt.pth
 ```
 
-### Training Options:
-- `--epoch`: Number of epochs (default: 300).
-- `--batch_size`: Batch size for training (default: 8).
-- `--attention`: Attention mechanism (choices: "self", "local", "global", "dynamic").
+###  Input Format
 
-This will output `.pytorch` checkpoint files containing the trained weights. The best model is saved as `bestg.pytorch`, and the final model is saved as `finalg.pytorch`.
+Your `.npz` files must contain the following keys:
+- `'data'`: Low-resolution Hi-C patches (shape: `[N, 1, 40, 40]`)
+- `'target'`: Ground truth high-resolution patches (same shape)
+
+###  Arguments
+
+| Argument        | Description                                      | Default        |
+|----------------|--------------------------------------------------|----------------|
+| `--train_data`  | Path to the training `.npz` dataset              | **Required**   |
+| `--valid_data`  | Path to the validation `.npz` dataset            | **Required**   |
+| `--epochs`      | Number of training epochs                        | `1`            |
+| `--batch_size`  | Batch size for training                          | `64`           |
+| `--lr`          | Learning rate for the optimizer                  | `0.0003`       |
+| `--save_path`   | Path to save the best model checkpoint           | `schicatt.pth` |
+
+###  Output
+
+The script saves the best-performing model (based on validation loss) to the specified path.
+
+By default, the model will be saved to `schicatt.pth`.
+
+___________________  
+
+## Inference
+
+After training the model, you can run inference (present in the `Training` folder) using the saved checkpoint on test data using:
+
+```
+python3 infer.py \
+  --input path/to/test_data.npz \
+  --checkpoint path/to/schicatt.pth \
+  --output path/to/output_directory \
+  --cuda 0
+```
+
+### Input Format
+
+The input `.npz` file must contain the following keys:
+- `'data'`: Low-resolution Hi-C patches (shape: `[N, 1, 40, 40]`)
+- `'inds'`: Index array indicating patch positions and chromosome IDs (shape: `[N, 4]`)
+
+### Arguments
+
+| Argument         | Description                                                  | Default     |
+|------------------|--------------------------------------------------------------|-------------|
+| `--input`        | Path to input `.npz` test dataset                            | **Required**|
+| `--checkpoint`   | Path to the trained model checkpoint `.pth` file             | **Required**|
+| `--output`       | Directory to save reconstructed full matrices                | **Required**|
+| `--multi-chrom`  | (Optional) Enable multi-chromosome handling if needed       | `False`     |
+| `--cuda`         | CUDA device ID (e.g., `0` for GPU, `-1` for CPU)             | `-1`        |
+
+### Output
+
+The script reconstructs chromosome-wise Hi-C matrices and saves them as compressed `.npz` files inside the specified output directory.
+
+Each output file is named as:
+```
+chr<chromosome_id>_schicatt.npz
+```
+and contains the key `'schicatt'` with the predicted high-resolution matrix.
+
+### Example
+
+```
+python3 infer_schicatt.py \
+  --input data/test_chr11.npz \
+  --checkpoint schicatt.pth \
+  --output results/ \
+  --cuda 0
+```
+
+This will generate the file `results/chr11_schicatt.npz` containing the inferred matrix.
+
 
 ___________________  
 
