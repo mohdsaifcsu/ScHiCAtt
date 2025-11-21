@@ -149,6 +149,22 @@ def train_schicatt(train_data_path, valid_data_path, num_epochs=1, batch_size=64
 
         for data, target in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
             data, target = data.to(device), target.to(device)
+            # Light training augmentation
+            if model.training:
+                # Small Gaussian noise
+                noise = torch.randn_like(data) * 0.02
+                data = data + noise
+
+                # Slight value scaling
+                if torch.rand(1).item() > 0.5:
+                    factor = torch.empty(1).uniform_(0.9, 1.1).item()
+                    data = data * factor
+
+                # Randomly drop a few entries , simulates missing contacts
+                if torch.rand(1).item() > 0.5:
+                    mask = (torch.rand_like(data) > 0.98).float()
+                    data = data * (1 - mask)
+
             optimizer.zero_grad()
             output = model(data)
             loss = criterion(output, target)
