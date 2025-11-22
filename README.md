@@ -203,7 +203,7 @@ ___________________
 
 If you use ScHiCAtt in your research, please cite the following:
 
-Menon, R., Chowdhury, H. M., & Oluwadare, O. (2025). ScHiCAtt: Enhancing single-cell Hi-C data resolution using attention-based models. Computational and Structural Biotechnology Journal, 27, 978-991. https://github.com/OluwadareLab/ScHiCAtt
+Menon, R., Chowdhury, H. M., & Oluwadare, O. (2025). ScHiCAtt: Enhancing single-cell Hi-C data resolution using attention-based models. Computational and Structural Biotechnology Journal, 27, 978-991. [https://doi.org/10.1016/j.csbj.2025.02.031](https://doi.org/10.1016/j.csbj.2025.02.031)
 ___________________  
 
 ## License:
