@@ -191,12 +191,19 @@ All the analysis scripts are available at **analysis** folder
 
 ___________________  
 
+
+## Data availability
+The ScHiCAtt project is publicly available at https://github.com/OluwadareLab/ScHiCAtt. ScHiCAtt web-server is publicly available at http://schicatt.hicrobin.online/.
+Drosophila Hi-C Data is publicly available at https://doi.org/10.5281/zenodo.10535486. Human Cell HiC data is available at https://salkinstitute.app.box.com/s/fp63a4j36m5k255dhje3zcj5kfuzkyj1.
+
+___________________  
+
+
 ## Cite:
 
 If you use ScHiCAtt in your research, please cite the following:
 
-Rohit Menon, Oluwatosin Oluwadare, *ScHiCAtt: Enhancing Single-Cell Hi-C Data with Attention Mechanisms*, [Journal Name], [Year], [DOI link if available].
-
+Menon, R., Chowdhury, H. M., & Oluwadare, O. (2025). ScHiCAtt: Enhancing single-cell Hi-C data resolution using attention-based models. Computational and Structural Biotechnology Journal, 27, 978-991. [https://doi.org/10.1016/j.csbj.2025.02.031](https://doi.org/10.1016/j.csbj.2025.02.031)
 ___________________  
 
 ## License:
